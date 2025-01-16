@@ -49,7 +49,10 @@
 #include <string>
 #include <utility>
 #include <vector>
-
+#include <basisu/encoder/basisu_enc.h>
+#include <basisu/encoder/basisu_comp.h>
+#include <basisu/transcoder/basisu_transcoder.h>
+#include <basisu/encoder/basisu_gpu_texture.h>
 // Auto-detect C++14 standard version
 #if !defined(TINYGLTF_USE_CPP14) && defined(__cplusplus) && \
     (__cplusplus >= 201402L)
@@ -2612,6 +2615,53 @@ void TinyGLTF::RemoveImageLoader() {
   load_image_user_data_ = nullptr;
   user_image_loader_ = false;
 }
+#include "basisu/transcoder/basisu_transcoder.h"
+bool decodeKTX2ToRGBA(const unsigned char*fileData, const int size, 
+                      std::vector<unsigned char> &outputRGBA, int &width,
+                      int &height) {
+
+
+  // Initialize ktx2_transcoder
+  basist::ktx2_transcoder transcoder;
+
+  // Initialize transcoder with the file data
+  if (!transcoder.init(fileData, size)) {
+    //std::cerr << "Failed to initialize ktx2_transcoder for file: " << filename
+    //          << std::endl;
+    return false;
+  }
+
+  // Retrieve texture dimensions
+  width = transcoder.get_width();
+  height = transcoder.get_height();
+  uint32_t levels = transcoder.get_levels();
+  //std::cout << "Width: " << width << ", Height: " << height
+  //          << ", Levels: " << levels << std::endl;
+
+  // Ensure the file contains valid 2D texture data
+  if (transcoder.get_faces() != 1 || width == 0 || height == 0) {
+    //std::cerr << "Unsupported texture format in file: " << filename
+    //          << std::endl;
+    return false;
+  }
+
+  // Prepare output buffer for RGBA data
+  size_t totalPixels = width * height;
+  outputRGBA.resize(totalPixels * 4);  // RGBA has 4 bytes per pixel
+
+  // Transcode the texture to RGBA32 format
+  if (!transcoder.transcode_image_level(
+          0,  // Mip level (use 0 for base level)
+          0,
+          0,  // Face index
+          outputRGBA.data(), totalPixels,
+          basist::transcoder_texture_format::cTFRGBA32)) {
+    //std::cerr << "Failed to transcode KTX2 file to RGBA." << std::endl;
+    return false;
+  }
+
+  return true;
+}
 
 #ifndef TINYGLTF_NO_STB_IMAGE
 bool LoadImageData(Image *image, const int image_idx, std::string *err,
@@ -2636,6 +2686,17 @@ bool LoadImageData(Image *image, const int image_idx, std::string *err,
         std::to_string(image_idx) + "] name = \"" + image->name + "\".\n";
     }
     if (!option.as_is) {
+      std::vector<unsigned char> rgbaData;
+      if (decodeKTX2ToRGBA(bytes, size, rgbaData, w, h)) {
+        image->width = w;
+        image->height = h;
+        image->component = 4;
+        image->bits = 16;
+        image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT;
+        image->image.resize(static_cast<size_t>(size));
+        std::copy(rgbaData.data(), rgbaData.data() + size, image->image.begin());
+          return true;
+      }
       // If we decode images, error out.
       return false;
     } else {
@@ -2763,6 +2824,113 @@ static void WriteToMemory_stbi(void *context, void *data, int size) {
   buffer->insert(buffer->end(), pData, pData + size);
 }
 
+static void fillParams(basisu::basis_compressor_params &params,
+                       const char *input, const char *output, bool uastc,
+                       int width, int height) {
+  if (uastc) {
+    static const uint32_t s_level_flags[basisu::TOTAL_PACK_UASTC_LEVELS] = {
+        basisu::cPackUASTCLevelFastest, basisu::cPackUASTCLevelFaster,
+        basisu::cPackUASTCLevelDefault, basisu::cPackUASTCLevelSlower,
+        basisu::cPackUASTCLevelVerySlow};
+
+    params.m_uastc = true;
+
+    params.m_pack_uastc_flags &= ~basisu::cPackUASTCLevelMask;
+    params.m_pack_uastc_flags |= s_level_flags[0];
+
+    params.m_rdo_uastc = true;
+    params.m_rdo_uastc_quality_scalar = 1;
+    params.m_rdo_uastc_dict_size = 1024;
+  } else {
+    params.m_compression_level = 0;
+    params.m_quality_level = 1;
+    params.m_max_endpoint_clusters = 0;
+    params.m_max_selector_clusters = 0;
+
+    //params.m_no_selector_rdo = info.normal_map;
+    //params.m_no_endpoint_rdo = info.normal_map;
+  }
+
+  //params.m_perceptual = info.srgb;
+
+  params.m_mip_gen = true;
+  //params.m_mip_srgb = info.srgb;
+
+  params.m_resample_width = width;
+  params.m_resample_height = height;
+
+  //params.m_y_flip = settings.texture_flipy;
+
+  params.m_create_ktx2_file = true;
+  //params.m_ktx2_srgb_transfer_func = info.srgb;
+
+  if (uastc) {
+    params.m_ktx2_uastc_supercompression = basist::KTX2_SS_ZSTANDARD;
+    params.m_ktx2_zstd_supercompression_level = 9;
+  }
+
+  params.m_read_source_images = true;
+
+#if BASISU_LIB_VERSION >= 150
+  params.m_write_output_basis_or_ktx2_files = true;
+#else
+  params.m_write_output_basis_files = true;
+#endif
+
+  params.m_source_filenames.resize(1);
+  params.m_source_filenames[0] = input;
+
+  params.m_out_filename = output;
+
+  params.m_status_output = false;
+}
+
+std::vector<unsigned char> encodeToKTX2(
+    const std::vector<unsigned char> &rgba_data,
+                                  int width, int height) {
+  // 1. 初始化basisu编码器
+  basisu::basis_compressor_params params;
+  basisu::basis_compressor compressor;
+
+  // 2. 配置输入参数
+  params.m_source_images.resize(1);
+  basisu::image &img = params.m_source_images[0];
+
+  // 设置RGBA像素数据（未压缩的8位图像数据）
+  img.init(rgba_data.data(), width, height, 4);  // 4 channels: R, G, B, A
+  std::copy(rgba_data.begin(), rgba_data.end(), img.get_ptr());
+
+  // 配置输出格式为KTX2
+  params.m_create_ktx2_file = true;
+
+  // 设置编码质量（1~255，255为最高质量）
+  params.m_quality_level = 128;
+
+  // 配置其他参数（如是否生成mipmap等）
+  params.m_perceptual = true;  // 感知编码
+  params.m_mip_gen = true;     // 生成mipmap
+
+  // 3. 调用编码器
+  if (!compressor.init(params)) {
+    //std::cerr << "Failed to initialize the basisu compressor.\n";
+    return std::vector<unsigned char>();
+  }
+
+  basisu::basis_compressor::error_code code = compressor.process();
+  if (code != basisu::basis_compressor::cECSuccess) {
+    //std::cerr << "Encoding failed with error code: " << code << "\n";
+    return std::vector<unsigned char>();
+  }
+
+  // 4. 获取KTX2数据并保存
+  const basisu::vector<unsigned char> &ktx2_data =
+      compressor.get_output_ktx2_file();
+
+   std::vector<unsigned char> std_data(ktx2_data.begin(), ktx2_data.end());
+  return std_data;
+}
+
+
 bool WriteImageData(const std::string *basepath, const std::string *filename,
                     const Image *image, bool embedImages,
                     const FsCallbacks* fs_cb, const URICallbacks *uri_cb,
@@ -2815,7 +2983,16 @@ bool WriteImageData(const std::string *basepath, const std::string *filename,
       return false;
     }
     header = "data:image/bmp;base64,";
-  } else if (!embedImages) {
+  } else if (ext == "ktx2") {
+    if (!image->as_is) {
+      data = encodeToKTX2(image->image, image->width, image->height);
+      if (data.empty()) {
+        return false;
+      }
+    }
+    header = "data:image/ktx2;base64,";
+  } 
+  else if (!embedImages) {
     // Error: can't output requested format to file
     return false;
   }

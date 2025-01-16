@@ -18,6 +18,7 @@ option(TINYGLTF_HEADER_ONLY "On: header-only mode. Off: create tinygltf library(
 option(TINYGLTF_INSTALL "Install tinygltf files during install step. Usually set to OFF if you include tinygltf through add_subdirectory()" ON)
 option(TINYGLTF_INSTALL_VENDOR "Install vendored nlohmann/json and nothings/stb headers" ON)
 
+
 if (TINYGLTF_BUILD_LOADER_EXAMPLE)
   add_executable(loader_example
     loader_example.cc
@@ -36,6 +37,9 @@ endif (TINYGLTF_BUILD_VALIDATOR_EXAMPLE)
 if (TINYGLTF_BUILD_BUILDER_EXAMPLE)
   add_subdirectory ( examples/build-gltf )
 endif (TINYGLTF_BUILD_BUILDER_EXAMPLE)
+
+
+
 
 #
 # for add_subdirectory and standalone build
@@ -59,6 +63,19 @@ else (TINYGLTF_HEADER_ONLY)
           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
           )
 endif (TINYGLTF_HEADER_ONLY)
+
+
+file(REAL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../basis_universal/out/install/x64-Release/include" BASISU_INCLUDE_DIR)
+file(REAL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../basis_universal/out/install/x64-Release/lib" BASISU_LIB_DIR)
+add_subdirectory(
+    "${CMAKE_CURRENT_SOURCE_DIR}/../basis_universal"
+     "${CMAKE_CURRENT_SOURCE_DIR}/basis_universal_build"
+)
+include_directories(${BASISU_INCLUDE_DIR})
+link_directories(${BASISU_LIB_DIR})
+target_link_libraries(loader_example "E:/ThreeDTilesLab/Plugins/MeshLab/extern/basis_universal/out/install/x64-Release/lib/basisu_encoder.lib")
+message(STATUS "ENCODER_LIB_SRC_LIST =  ${BASISU_INCLUDE_DIR}")
+
 
 if (TINYGLTF_INSTALL)
   install(TARGETS tinygltf EXPORT tinygltfTargets)

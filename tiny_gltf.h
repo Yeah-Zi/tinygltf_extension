@@ -2616,18 +2616,17 @@ void TinyGLTF::RemoveImageLoader() {
   user_image_loader_ = false;
 }
 #include "basisu/transcoder/basisu_transcoder.h"
-bool decodeKTX2ToRGBA(const unsigned char*fileData, const int size, 
+bool decodeKTX2ToRGBA(const unsigned char *fileData, const int size,
                       std::vector<unsigned char> &outputRGBA, int &width,
-                      int &height) {
-
+                      int &height, std::string &errorMessage) {
+  basist::basisu_transcoder_init();
 
   // Initialize ktx2_transcoder
   basist::ktx2_transcoder transcoder;
 
   // Initialize transcoder with the file data
   if (!transcoder.init(fileData, size)) {
-    //std::cerr << "Failed to initialize ktx2_transcoder for file: " << filename
-    //          << std::endl;
+    errorMessage = "Failed to initialize ktx2_transcoder.";
     return false;
   }
 
@@ -2635,33 +2634,33 @@ bool decodeKTX2ToRGBA(const unsigned char*fileData, const int size,
   width = transcoder.get_width();
   height = transcoder.get_height();
   uint32_t levels = transcoder.get_levels();
-  //std::cout << "Width: " << width << ", Height: " << height
-  //          << ", Levels: " << levels << std::endl;
 
   // Ensure the file contains valid 2D texture data
   if (transcoder.get_faces() != 1 || width == 0 || height == 0) {
-    //std::cerr << "Unsupported texture format in file: " << filename
-    //          << std::endl;
+    errorMessage = "Unsupported texture format or invalid dimensions.";
     return false;
   }
 
   // Prepare output buffer for RGBA data
   size_t totalPixels = width * height;
   outputRGBA.resize(totalPixels * 4);  // RGBA has 4 bytes per pixel
-
+  transcoder.start_transcoding();
   // Transcode the texture to RGBA32 format
   if (!transcoder.transcode_image_level(
           0,  // Mip level (use 0 for base level)
-          0,
+          0,  // Array layer index
           0,  // Face index
           outputRGBA.data(), totalPixels,
           basist::transcoder_texture_format::cTFRGBA32)) {
-    //std::cerr << "Failed to transcode KTX2 file to RGBA." << std::endl;
+    errorMessage = "Failed to transcode KTX2 file to RGBA.";
     return false;
   }
 
+  // If everything succeeds, clear the error message
+  errorMessage.clear();
   return true;
 }
+
 
 #ifndef TINYGLTF_NO_STB_IMAGE
 bool LoadImageData(Image *image, const int image_idx, std::string *err,
@@ -2687,14 +2686,15 @@ bool LoadImageData(Image *image, const int image_idx, std::string *err,
     }
     if (!option.as_is) {
       std::vector<unsigned char> rgbaData;
-      if (decodeKTX2ToRGBA(bytes, size, rgbaData, w, h)) {
+      if (decodeKTX2ToRGBA(bytes, size, rgbaData, w, h, *err)) {
         image->width = w;
         image->height = h;
         image->component = 4;
-        image->bits = 16;
-        image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT;
+        image->bits = 8;
+        image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
         image->image.resize(static_cast<size_t>(size));
-        std::copy(rgbaData.data(), rgbaData.data() + size, image->image.begin());
+        std::copy(rgbaData.data(), rgbaData.data() + rgbaData.size(),
+                  image->image.begin());
           return true;
       }
       // If we decode images, error out.

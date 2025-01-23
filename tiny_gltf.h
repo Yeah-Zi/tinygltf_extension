@@ -2692,7 +2692,7 @@ bool LoadImageData(Image *image, const int image_idx, std::string *err,
         image->component = 4;
         image->bits = 8;
         image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
-        image->image.resize(static_cast<size_t>(size));
+        image->image.resize(static_cast<size_t>(rgbaData.size()));
         std::copy(rgbaData.data(), rgbaData.data() + rgbaData.size(),
                   image->image.begin());
           return true;
@@ -2888,7 +2888,8 @@ static void fillParams(basisu::basis_compressor_params &params,
 std::vector<unsigned char> encodeToKTX2(
     const std::vector<unsigned char> &rgba_data,
                                   int width, int height) {
-  // 1. 初始化basisu编码器
+  basisu::basisu_encoder_init();
+    // 1. 初始化basisu编码器
   basisu::basis_compressor_params params;
   basisu::basis_compressor compressor;
 
@@ -2898,18 +2899,34 @@ std::vector<unsigned char> encodeToKTX2(
 
   // 设置RGBA像素数据（未压缩的8位图像数据）
   img.init(rgba_data.data(), width, height, 4);  // 4 channels: R, G, B, A
-  std::copy(rgba_data.begin(), rgba_data.end(), img.get_ptr());
 
   // 配置输出格式为KTX2
   params.m_create_ktx2_file = true;
 
   // 设置编码质量（1~255，255为最高质量）
-  params.m_quality_level = 128;
+  params.m_quality_level = 255;
+  params.m_resample_width = width;
+  params.m_resample_height = height;
 
+  		static const uint32_t s_level_flags[basisu::TOTAL_PACK_UASTC_LEVELS] = {
+      basisu::cPackUASTCLevelFastest, basisu::cPackUASTCLevelFaster,
+      basisu::cPackUASTCLevelDefault, basisu::cPackUASTCLevelSlower,
+      basisu::cPackUASTCLevelVerySlow};
+
+  params.m_uastc = true;
+
+  params.m_pack_uastc_flags &= ~basisu::cPackUASTCLevelMask;
+
+  params.m_rdo_uastc_dict_size = 1024;
+    params.m_ktx2_uastc_supercompression = basist::KTX2_SS_ZSTANDARD;
+    params.m_ktx2_zstd_supercompression_level = 9;
+  
   // 配置其他参数（如是否生成mipmap等）
   params.m_perceptual = true;  // 感知编码
   params.m_mip_gen = true;     // 生成mipmap
 
+  basisu::job_pool task_jpool(1);
+  params.m_pJob_pool = &task_jpool;
   // 3. 调用编码器
   if (!compressor.init(params)) {
     //std::cerr << "Failed to initialize the basisu compressor.\n";
@@ -6671,7 +6688,11 @@ bool TinyGLTF::LoadFromString(Model *model, std::string *err, std::string *warn,
                         base_dir)) {
         return false;
       }
-
+      auto it = texture.extensions.find("KHR_texture_basisu");//已解码ktx2文件
+      if (it != texture.extensions.end()) {
+        texture.source = it->second.Get("source").GetNumberAsInt();
+        texture.extensions.erase(it);
+      }
       model->textures.emplace_back(std::move(texture));
       return true;
     });
